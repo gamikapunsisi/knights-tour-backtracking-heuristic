@@ -29,8 +29,8 @@ app.add_middleware(
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
-DB_NAME = os.getenv("DB_NAME", "knights_tour")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "knights_tour_db")
 DB_PORT = os.getenv("DB_PORT", "3306")
 
 # ─────────────────────────────────────────────
@@ -74,48 +74,61 @@ def init_db():
         conn = get_db()
         cur = conn.cursor()
         
-        # Normalized Schema
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS players (
-                id          INT AUTO_INCREMENT PRIMARY KEY,
-                name        VARCHAR(50) NOT NULL UNIQUE,
-                created_at  DATETIME NOT NULL
-            );
-        """)
-
+        # 1. Algorithms Table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS algorithms (
-                id          INT AUTO_INCREMENT PRIMARY KEY,
-                name        VARCHAR(50) NOT NULL UNIQUE
-            );
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(50) UNIQUE NOT NULL
+            ) ENGINE=InnoDB;
         """)
 
+        # 2. Players Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(50) UNIQUE NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB;
+        """)
+
+        # 3. Game Sessions Table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS game_sessions (
-                id              INT AUTO_INCREMENT PRIMARY KEY,
-                player_id       INT NOT NULL,
-                board_size      INT NOT NULL,
-                start_row       INT NOT NULL,
-                start_col       INT NOT NULL,
-                algorithm_id    INT NOT NULL,
-                time_taken_ms   INT NOT NULL,
-                is_correct      TINYINT(1) NOT NULL DEFAULT 0,
-                played_at       DATETIME NOT NULL,
-                FOREIGN KEY (player_id) REFERENCES players(id),
-                FOREIGN KEY (algorithm_id) REFERENCES algorithms(id)
-            );
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                player_id INT NOT NULL,
+                board_size INT NOT NULL,
+                start_row INT NOT NULL,
+                start_col INT NOT NULL,
+                algorithm_id INT NOT NULL,
+                time_taken_ms INT NOT NULL,
+                is_correct TINYINT(1) DEFAULT 0,
+                played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_player FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE,
+                CONSTRAINT fk_algorithm FOREIGN KEY (algorithm_id) REFERENCES algorithms(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB;
         """)
 
+        # 4. Move Records Table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS move_records (
-                id          INT AUTO_INCREMENT PRIMARY KEY,
-                session_id  INT NOT NULL,
-                move_order  INT NOT NULL,
-                row_pos     INT NOT NULL,
-                col_pos     INT NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES game_sessions(id)
-            );
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                session_id INT NOT NULL,
+                move_order INT NOT NULL,
+                row_pos INT NOT NULL,
+                col_pos INT NOT NULL,
+                CONSTRAINT fk_session FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB;
         """)
+
+        # 5. Performance Indexes
+        try:
+            cur.execute("CREATE INDEX idx_player_name ON players(name)")
+            cur.execute("CREATE INDEX idx_game_player ON game_sessions(player_id)")
+            cur.execute("CREATE INDEX idx_game_algorithm ON game_sessions(algorithm_id)")
+            cur.execute("CREATE INDEX idx_game_board ON game_sessions(board_size)")
+            cur.execute("CREATE INDEX idx_moves_session ON move_records(session_id)")
+        except Error:
+            pass # Indexes already exist
 
         # Pre-populate algorithms
         cur.execute("INSERT IGNORE INTO algorithms (name) VALUES ('warnsdorff'), ('backtracking')")
@@ -355,12 +368,13 @@ def validate_and_save(req: ValidateRequest):
         cur.execute("SELECT id FROM algorithms WHERE name = %s", (req.algorithm_used,))
         algo_row = cur.fetchone()
         if not algo_row:
+            logger.info(f"Adding new algorithm: {req.algorithm_used}")
             cur.execute("INSERT INTO algorithms (name) VALUES (%s)", (req.algorithm_used,))
             algorithm_id = cur.lastrowid
         else:
             algorithm_id = algo_row["id"]
 
-        # Insert or ignore player (MySQL syntax: INSERT IGNORE)
+        # Insert or ignore player
         cur.execute(
             "INSERT IGNORE INTO players (name, created_at) VALUES (%s, %s)",
             (req.player_name, datetime.utcnow())
@@ -368,10 +382,11 @@ def validate_and_save(req: ValidateRequest):
         cur.execute("SELECT id FROM players WHERE name=%s", (req.player_name,))
         row = cur.fetchone()
         if not row:
-            raise Exception("Failed to create or find player")
+            raise Exception(f"Failed to find player '{req.player_name}' after insert")
         player_id = row["id"]
 
         # Session record
+        logger.info(f"Saving session for player {req.player_name} (ID: {player_id}), Correct: {correct}")
         cur.execute("""
             INSERT INTO game_sessions
               (player_id, board_size, start_row, start_col,
@@ -387,6 +402,7 @@ def validate_and_save(req: ValidateRequest):
 
         # Move records
         if correct:
+            logger.info(f"Saving {len(req.player_moves)} moves for session {session_id}")
             moves_data = [
                 (session_id, i, m[0], m[1])
                 for i, m in enumerate(req.player_moves)
@@ -397,11 +413,12 @@ def validate_and_save(req: ValidateRequest):
             )
             
         conn.commit()
+        logger.info(f"Successfully committed game session {session_id} to MySQL")
     except Exception as e:
-        if conn:
+        if 'conn' in locals() and conn:
             conn.rollback()
-        logger.error(f"Database error: {str(e)}")
-        raise HTTPException(500, f"Internal Server Error: {str(e)}")
+        logger.error(f"Database error in validate_and_save: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
         if conn:
             conn.close()
@@ -427,8 +444,44 @@ def leaderboard():
         """)
         rows = cur.fetchall()
         return rows
+    except Exception as e:
+        logger.error(f"Database error in leaderboard: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
-        conn.close()
+        if 'conn' in locals() and conn:
+            conn.close()
+
+
+@app.get("/debug/db")
+def debug_db():
+    """Diagnostic endpoint to check MySQL record counts"""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        stats = {}
+        
+        cur.execute("SELECT COUNT(*) FROM players")
+        stats["players"] = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM game_sessions")
+        stats["sessions"] = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM move_records")
+        stats["moves"] = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM algorithms")
+        stats["algorithms"] = cur.fetchone()[0]
+        
+        return {
+            "status": "connected",
+            "db_name": DB_NAME,
+            "counts": stats
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
 
 @app.get("/history/{player_name}")
@@ -448,5 +501,9 @@ def player_history(player_name: str):
         """, (player_name,))
         rows = cur.fetchall()
         return rows
+    except Exception as e:
+        logger.error(f"Database error in player_history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
-        conn.close()
+        if 'conn' in locals() and conn:
+            conn.close()

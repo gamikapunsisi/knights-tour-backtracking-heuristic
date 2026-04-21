@@ -27,6 +27,109 @@ function getReachable(r, c, n, visited) {
     );
 }
 
+// ── SVG Path Layer ────────────────────────────────────────────────────────────
+function PathLayer({ path, boardSize, cellSize, gap }) {
+  if (path.length < 2) return null;
+  const padding = boardSize === 8 ? 10 : 6;
+  const getCenter = (r, c) => {
+    const x = padding + c * (cellSize + gap) + cellSize / 2;
+    const y = padding + r * (cellSize + gap) + cellSize / 2;
+    return { x, y };
+  };
+
+  const points = path.map(([r, c]) => {
+    const { x, y } = getCenter(r, c);
+    return `${x},${y}`;
+  });
+
+  const lastPoint = getCenter(path[path.length - 1][0], path[path.length - 1][1]);
+  const prevPoint = getCenter(path[path.length - 2][0], path[path.length - 2][1]);
+
+  return (
+    <svg style={{
+      position: "absolute", inset: 0, pointerEvents: "none",
+      width: "100%", height: "100%", zIndex: 10
+    }}>
+      <polyline
+        points={points.join(" ")}
+        fill="none"
+        stroke="#ffd70033"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ transition: "all 0.3s ease" }}
+      />
+      {/* Animated segment for the latest move */}
+      <line
+        x1={prevPoint.x} y1={prevPoint.y}
+        x2={lastPoint.x} y2={lastPoint.y}
+        stroke="#ffd700"
+        strokeWidth="4"
+        strokeLinecap="round"
+        style={{ filter: "drop-shadow(0 0 5px #ffd70088)" }}
+      />
+    </svg>
+  );
+}
+
+// ── Result Overlay Modal ──────────────────────────────────────────────────────
+function ResultOverlay({ status, stats, onRestart, onMenu }) {
+  const isWon = status === "won";
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 10000,
+      background: "#080814ee", backdropFilter: "blur(12px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      animation: "fadeIn 0.5s ease"
+    }}>
+      <div style={{
+        ...S.card, maxWidth: 480, textAlign: "center",
+        border: `2px solid ${isWon ? "#00d4aa" : "#ff4757"}`,
+        boxShadow: `0 0 100px ${isWon ? "#00d4aa22" : "#ff475722"}`
+      }}>
+        <div style={S.cornerTL} /><div style={S.cornerTR} />
+        <div style={S.cornerBL} /><div style={S.cornerBR} />
+
+        <h1 style={{ ...S.bigTitle, color: isWon ? "#00d4aa" : "#ff4757", fontSize: 40 }}>
+          {isWon ? "Triumph!" : "Stuck!"}
+        </h1>
+        <p style={{ ...S.tagline, marginBottom: 30 }}>
+          {isWon 
+            ? "You have conquered the board with a perfect Knight's Tour." 
+            : "The knight can no longer proceed. A noble effort nonetheless."}
+        </p>
+
+        <div style={{ 
+          display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, 
+          background: "#1a1a3e", padding: 20, borderRadius: 12, marginBottom: 32 
+        }}>
+          <div>
+            <p style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Time</p>
+            <p style={{ color: "#fff", fontSize: 20, fontWeight: 700 }}>{stats.time}s</p>
+          </div>
+          <div>
+            <p style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Coverage</p>
+            <p style={{ color: "#ffd700", fontSize: 20, fontWeight: 700 }}>{stats.percent}%</p>
+          </div>
+          <div>
+            <p style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Moves</p>
+            <p style={{ color: "#a78bfa", fontSize: 20, fontWeight: 700 }}>{stats.moves}</p>
+          </div>
+          <div>
+            <p style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Algorithm</p>
+            <p style={{ color: "#60a5fa", fontSize: 14, fontWeight: 700, marginTop: 4 }}>{stats.algo}</p>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <button style={S.goldBtn} onClick={onRestart}>Play Again</button>
+          <button style={S.outlineBtn("#888")} onClick={onMenu}>Return to Library</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Toast notification ────────────────────────────────────────────────────────
 function Toast({ msg, type, onClose }) {
   useEffect(() => {
@@ -133,6 +236,7 @@ export default function KnightsTour() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [leaderboard,  setLeaderboard]  = useState([]);
   const [elapsedMs,    setElapsedMs]    = useState(0);
+  const [hoveredCell,  setHoveredCell]  = useState(null);
 
   const timerRef     = useRef(null);
   const startTimeRef = useRef(null);
@@ -168,8 +272,19 @@ export default function KnightsTour() {
   // ── Start game ────────────────────────────────────────────────────────────
   const startGame = async () => {
     const name = playerName.trim();
-    if (!name)          { setNameError("Name is required");       return; }
-    if (name.length > 50) { setNameError("Maximum 50 characters"); return; }
+    if (!name) {
+      setNameError("Name is required");
+      return;
+    }
+    // Validation: Letters and spaces only
+    if (!/^[a-zA-Z\s]+$/.test(name)) {
+      setNameError("Name must contain letters only (no numbers)");
+      return;
+    }
+    if (name.length > 50) {
+      setNameError("Maximum 50 characters");
+      return;
+    }
     setNameError("");
     setLoading(true);
 
@@ -267,7 +382,7 @@ export default function KnightsTour() {
   // ── Save result to backend ────────────────────────────────────────────────
   const saveResult = async (moves, isCorrect, ms) => {
     try {
-      await fetch(`${API}/validate`, {
+      const res = await fetch(`${API}/validate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -281,7 +396,16 @@ export default function KnightsTour() {
           time_taken_ms:  ms,
         }),
       });
-    } catch { /* silent — don't break UX */ }
+      if (!res.ok) {
+        const err = await res.json();
+        showToast(`Storage Alert: ${err.detail || "Failed to save result"}`, "error");
+      } else {
+        console.log("Game result saved successfully to MySQL");
+      }
+    } catch (e) {
+      showToast(`Connection Error: Could not save your result to the database.`, "error");
+      console.error("Save error:", e);
+    }
   };
 
   // ── Undo one move ─────────────────────────────────────────────────────────
@@ -320,14 +444,19 @@ export default function KnightsTour() {
 
   // ── Load leaderboard ──────────────────────────────────────────────────────
   const loadLeaderboard = async () => {
+    setLoading(true);
     try {
       const res = await fetch(`${API}/leaderboard`);
-      setLeaderboard(await res.json());
-    } catch {
+      if (!res.ok) throw new Error("Failed to fetch leaderboard");
+      const data = await res.json();
+      setLeaderboard(data);
+      setScreen("leaderboard");
+    } catch (e) {
       setLeaderboard([]);
-      showToast("Could not load leaderboard", "error");
+      showToast(e.message || "Could not load leaderboard", "error");
+    } finally {
+      setLoading(false);
     }
-    setScreen("leaderboard");
   };
 
   // ── Board helpers ─────────────────────────────────────────────────────────
@@ -366,9 +495,9 @@ export default function KnightsTour() {
         <div style={{ textAlign: "center", marginBottom: 8 }}>
           <KnightIcon size={72} color="#ffd700" />
         </div>
-        <h1 style={S.bigTitle}>Knight's Tour</h1>
+        <h1 style={S.bigTitle}>Knight's Tour Problem</h1>
         <p style={S.tagline}>
-          Move the knight to visit every square on the board — exactly once.
+          Identify the sequence of moves such that the knight visits every square exactly once.
         </p>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 32 }}>
@@ -476,7 +605,11 @@ export default function KnightsTour() {
           placeholder="Enter your name…"
           value={playerName}
           maxLength={50}
-          onChange={e => { setPlayerName(e.target.value); setNameError(""); }}
+          onChange={e => {
+            const val = e.target.value.replace(/[0-9]/g, ""); // Prevent numbers
+            setPlayerName(val);
+            setNameError("");
+          }}
           onKeyDown={e => e.key === "Enter" && startGame()}
         />
         {nameError && (
@@ -569,106 +702,111 @@ export default function KnightsTour() {
         </div>
       </div>
 
-      {/* ── Progress bar ── */}
-      <div style={{ width: "100%", maxWidth: 600, margin: "10px auto 4px", background: "#1a1a3e", borderRadius: 8, height: 6, overflow: "hidden" }}>
+      {/* ── Status HUD (Desktop over board) ── */}
+      {(gameStatus === "won" || gameStatus === "lost") && (
+        <ResultOverlay 
+          status={gameStatus}
+          stats={{
+            time: (elapsedMs / 1000).toFixed(1),
+            percent: progress,
+            moves: playerPath.length,
+            algo: algorithm === "warnsdorff" ? "Warnsdorff's" : "Backtracking"
+          }}
+          onRestart={restart}
+          onMenu={() => setScreen("menu")}
+        />
+      )}
+
+      {/* ── Board container ── */}
+      <div style={{ position: "relative", margin: "0 auto" }}>
         <div style={{
-          height: "100%", borderRadius: 8,
-          width: `${progress}%`,
-          background: gameStatus === "won"
-            ? "linear-gradient(90deg,#00d4aa,#60a5fa)"
-            : "linear-gradient(90deg,#ffd700,#ff6b9d)",
-          transition: "width .4s ease",
-        }} />
-      </div>
-      <p style={{ color: "#444", fontSize: 11, textAlign: "center", marginBottom: 10 }}>
-        {progress}% complete
-      </p>
+          display: "grid",
+          gridTemplateColumns: `repeat(${boardSize}, ${cellSize}px)`,
+          gap: boardSize === 8 ? 3 : 2,
+          background: "#080814",
+          padding: boardSize === 8 ? 10 : 6,
+          borderRadius: 14,
+          border: "2px solid #2a2a5e",
+          boxShadow: "0 0 60px #ffd70015",
+          animation: "fadeIn .4s ease",
+          position: "relative",
+        }}>
+          {/* SVG Path Tracing */}
+          <PathLayer 
+            path={playerPath} 
+            boardSize={boardSize} 
+            cellSize={cellSize} 
+            gap={boardSize === 8 ? 3 : 2} 
+          />
 
-      {/* ── Status banners ── */}
-      {gameStatus === "won" && (
-        <div style={S.banner("#00d4aa")}>
-          🎉 Brilliant! You completed the Knight's Tour in {(elapsedMs/1000).toFixed(2)}s!
-          <br />
-          <span style={{ fontSize: 13, opacity: .8 }}>Your result has been saved.</span>
+          {Array.from({ length: boardSize }, (_, r) =>
+            Array.from({ length: boardSize }, (_, c) => {
+              const { key, moveNum, isLast, isStart, isHint, solIdx, showSol, light } = getCellInfo(r, c);
+
+              // L-move visual check
+              const isHoveredL = hoveredCell && validKnightMove(hoveredCell.r, hoveredCell.c, r, c) && !visited[key];
+
+              // Background logic
+              let bg = light ? "#252550" : "#18183a";
+              if (moveNum && !isLast)  bg = "#1e2d52";
+              if (isLast)              bg = "#3a2e00";
+              if (isHint)              bg = "#1a2e1a";
+              if (showSol)             bg = "#0d2a22";
+              if (isStart && !moveNum) bg = "#2a1a4e";
+              if (isHoveredL)          bg = "#ffd70011";
+
+              // Border
+              let border = "2px solid transparent";
+              if (isLast)  border = "2px solid #ffd700";
+              if (isHint)  border = "2px solid #00d4aa55";
+              if (showSol) border = "2px solid #00d4aa44";
+              if (isHoveredL) border = "1px dashed #ffd70044";
+
+              return (
+                <div
+                  key={key}
+                  onMouseEnter={() => setHoveredCell({ r, c })}
+                  onMouseLeave={() => setHoveredCell(null)}
+                  onClick={() => handleCellClick(r, c)}
+                  title={`Row ${r}, Col ${c}${moveNum ? ` — Move #${moveNum}` : ""}`}
+                  style={{
+                    width: cellSize, height: cellSize,
+                    background: bg, border, borderRadius: boardSize === 8 ? 6 : 3,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: gameStatus === "playing" ? "pointer" : "default",
+                    fontSize: boardSize === 8 ? 14 : 9,
+                    fontWeight: 700,
+                    color: isLast   ? "#ffd700"
+                         : moveNum  ? "#6080c0"
+                         : showSol  ? "#00d4aa"
+                         : isHint   ? "#00d4aa88"
+                         : isHoveredL ? "#ffd70088"
+                         : "#333",
+                    userSelect: "none",
+                    transition: "background .12s, border .12s",
+                    animation: isLast ? "glow 2s infinite" : "none",
+                    position: "relative",
+                    zIndex: 20
+                  }}>
+                  {isLast && gameStatus === "playing"
+                    ? <KnightIcon size={boardSize === 8 ? 34 : 18} color="#ffd700" />
+                    : isLast && gameStatus !== "playing"
+                      ? moveNum
+                    : moveNum
+                      ? moveNum
+                    : showSol
+                      ? (solIdx + 1)
+                    : isHint
+                      ? "·"
+                    : isStart && playerPath.length === 1
+                      ? <KnightIcon size={boardSize === 8 ? 34 : 18} color="#a78bfa" />
+                    : null
+                  }
+                </div>
+              );
+            })
+          )}
         </div>
-      )}
-      {gameStatus === "lost" && (
-        <div style={S.banner("#ff4757")}>
-          😞 Knight is stuck! Correct path shown in teal below.
-        </div>
-      )}
-
-      {/* ── Board ── */}
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${boardSize}, ${cellSize}px)`,
-        gap: boardSize === 8 ? 3 : 2,
-        background: "#080814",
-        padding: boardSize === 8 ? 10 : 6,
-        borderRadius: 14,
-        border: "2px solid #2a2a5e",
-        boxShadow: "0 0 60px #ffd70015",
-        margin: "0 auto",
-        animation: "fadeIn .4s ease",
-      }}>
-        {Array.from({ length: boardSize }, (_, r) =>
-          Array.from({ length: boardSize }, (_, c) => {
-            const { key, moveNum, isLast, isStart, isHint, solIdx, showSol, light } = getCellInfo(r, c);
-
-            // Background
-            let bg = light ? "#252550" : "#18183a";
-            if (moveNum && !isLast)  bg = "#1e2d52";
-            if (isLast)              bg = "#3a2e00";
-            if (isHint)              bg = "#1a2e1a";
-            if (showSol)             bg = "#0d2a22";
-            if (isStart && !moveNum) bg = "#2a1a4e";
-
-            // Border
-            let border = "2px solid transparent";
-            if (isLast)  border = "2px solid #ffd700";
-            if (isHint)  border = "2px solid #00d4aa55";
-            if (showSol) border = "2px solid #00d4aa44";
-
-            return (
-              <div
-                key={key}
-                onClick={() => handleCellClick(r, c)}
-                title={`Row ${r}, Col ${c}${moveNum ? ` — Move #${moveNum}` : ""}`}
-                style={{
-                  width: cellSize, height: cellSize,
-                  background: bg, border, borderRadius: boardSize === 8 ? 6 : 3,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  cursor: gameStatus === "playing" ? "pointer" : "default",
-                  fontSize: boardSize === 8 ? 14 : 9,
-                  fontWeight: 700,
-                  color: isLast   ? "#ffd700"
-                       : moveNum  ? "#6080c0"
-                       : showSol  ? "#00d4aa"
-                       : isHint   ? "#00d4aa88"
-                       : "#333",
-                  userSelect: "none",
-                  transition: "background .12s, border .12s",
-                  animation: isLast ? "glow 2s infinite" : "none",
-                  position: "relative",
-                }}>
-                {isLast && gameStatus === "playing"
-                  ? <KnightIcon size={boardSize === 8 ? 34 : 18} color="#ffd700" />
-                  : isLast && gameStatus !== "playing"
-                    ? moveNum
-                  : moveNum
-                    ? moveNum
-                  : showSol
-                    ? (solIdx + 1)
-                  : isHint
-                    ? "·"
-                  : isStart && playerPath.length === 1
-                    ? <KnightIcon size={boardSize === 8 ? 34 : 18} color="#a78bfa" />
-                  : null
-                }
-              </div>
-            );
-          })
-        )}
       </div>
 
       {/* ── Controls ── */}
